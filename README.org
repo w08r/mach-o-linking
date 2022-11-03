@@ -1,0 +1,359 @@
+#+options: :toc t
+
+* Mach-O Linking and Loading
+
+/Investigating linking on an M1./
+
+** Simple object linking
+:PROPERTIES:
+:header-args:sh: :dir 01--simple-compile
+:END:
+
+#+begin_src sh :exports none
+  make clean
+#+end_src
+
+#+RESULTS:
+: rm -f run *.o
+
+This section describes the files found in [[file:01--simple-compile]].
+
+Given the following assembly code:
+
+#+BEGIN_SRC sh :wrap src asm :exports results :results verbatim
+cat foo.s
+#+END_SRC
+
+#+RESULTS:
+#+begin_src asm
+;;; see https://sourceware.org/binutils/docs/as/Pseudo-Ops.html
+;;; for details on the . directives and
+;;; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;;; some docs here on the aarch64 instructions:
+;;; https://wiki.cdot.senecacollege.ca/wiki/Aarch64_Register_and_Instruction_Quick_Start
+
+;;; transpiled from (-O0 of)
+;;; uint64_t foo(uint64_t a, uint64_t b) { return a + b; }
+;;;
+	.globl	_foo
+	.p2align	2
+_foo:
+	.cfi_startproc
+	sub	sp, sp, #16     ; grab some space on stack
+	str	x0, [sp, #8]    ; save x0 (first arg) in to the stack (offset by 8)
+	str	x1, [sp]        ; save x1 (second arg) into the stack
+	ldr	x8, [sp, #8]    ; load x8 with the first arg
+	ldr	x9, [sp]        ; load x9 with the second arg
+	add	x0, x8, x9      ; insert the sum of x8 and x9 in to x0
+	add	sp, sp, #16     ; put stack back to how it was
+	ret                     ; return
+	.cfi_endproc
+#+end_src
+
+And given the following consumer code:
+
+#+BEGIN_SRC sh :wrap src c :exports results :results verbatim
+cat run.c
+#+END_SRC
+
+#+RESULTS:
+#+begin_src c
+#include <stdio.h>
+#include <stdint.h>
+
+extern uint64_t foo(uint64_t a, uint64_t b);
+
+int main() {
+    printf("%llu + %llu = %llu\n", 2ull, 2ull, foo(2ull, 2ull));
+}
+#+end_src
+
+Compiling the individual translation units into object files and then
+linking them into an executable can be achieved with the default make
+target:
+
+#+name: simple1
+#+begin_src sh :results verbatim :exports both
+  make
+#+end_src
+
+This results in the following:
+
+#+call: simple1() :exports results
+
+#+RESULTS:
+: clang -c -g -O0 foo.s run.c
+: clang -O0 -g -o run run.o foo.o
+
+And the code is run as follows:
+
+#+begin_src sh :results verbatim :exports both
+  ./run
+#+end_src
+
+#+RESULTS:
+: 2 + 2 = 4
+
+The otool-classic command can be used to inspect Mach-O binaries, the
+~dis~ target in the first ~Makefile~ illustrates how, and the ~otfoo~
+target disassembles just the ~foo.o~ module:
+
+#+begin_src sh :results verbatim :exports both
+  make otfoo
+#+end_src
+
+#+RESULTS:
+#+begin_example
+otool -xvVj foo.o
+foo.o:
+(__TEXT,__text) section
+_foo:
+0000000000000000	d10043ff	sub	sp, sp, #0x10
+0000000000000004	f90007e0	str	x0, [sp, #0x8]
+0000000000000008	f90003e1	str	x1, [sp]
+000000000000000c	f94007e8	ldr	x8, [sp, #0x8]
+0000000000000010	f94003e9	ldr	x9, [sp]
+0000000000000014	8b090100	add	x0, x8, x9
+0000000000000018	910043ff	add	sp, sp, #0x10
+000000000000001c	d65f03c0	ret
+#+end_example
+
+We can use ~od~ to inspect the actual contents of the ~foo.o~ module
+to see that the binary representation of the instructions emitted by
+otool can be located verbatim in the raw binary of the compiled
+module.
+
+#+begin_src sh :results verbatim :exports both
+  make odfoo | rg -A2 d10043ff
+#+end_src
+
+#+RESULTS:
+: 0002c0 00000000 00000000 d10043ff f90007e0
+: 0002d0 f90003e1 f94007e8 f94003e9 8b090100
+: 0002e0 910043ff d65f03c0 00000000 00000000
+
+** A Static Library
+:PROPERTIES:
+:header-args:sh: :dir 02--static-lib
+:END:
+
+#+begin_src sh :exports none
+  make clean
+#+end_src
+
+#+RESULTS:
+: rm -f run *.o libfoo.a
+
+This section describes the files found in [[file:02--static-lib]].
+
+Compiling the individual translation units into object files and then
+catenating them into a static library for later linking them into an
+executable can be achieved with the default make target which builds
+~libfoo.a~ first and then links that with ~run.o~ during the
+generation of the final executable:
+
+#+begin_src sh :results verbatim :exports both
+  make
+#+end_src
+
+#+RESULTS:
+: clang -o foo.o -c foo.s
+: ar r libfoo.a foo.o
+: clang -c run.c
+: clang -o run run.o libfoo.a
+
+Looking at the (tail end of) disassembly, it's clear that the final
+result is not much different to compiling everything together at once:
+
+#+begin_src sh :results verbatim :exports both
+  make dis | tail -11
+#+end_src
+
+#+RESULTS:
+#+begin_example
+0000000100003f68	add	sp, sp, #0x30
+0000000100003f6c	ret
+_foo:
+0000000100003f70	sub	sp, sp, #0x10
+0000000100003f74	str	x0, [sp, #0x8]
+0000000100003f78	str	x1, [sp]
+0000000100003f7c	ldr	x8, [sp, #0x8]
+0000000100003f80	ldr	x9, [sp]
+0000000100003f84	add	x0, x8, x9
+0000000100003f88	add	sp, sp, #0x10
+0000000100003f8c	ret
+#+end_example
+
+** Dynamic Library Linking
+:PROPERTIES:
+:header-args:sh: :dir 03--dynamic-link
+:END:
+
+#+begin_src sh :exports none
+  make clean
+#+end_src
+
+#+RESULTS:
+: rm -f run *.o libfoo.dylib
+
+This section describes the files found in [[file:03--dynamic-link]].
+
+Compiling the individual translation units into object files and then
+linking them into a self contained dynamic library for later linking
+against an executable can be achieved with the default make target
+which builds ~libfoo.dylib~ first and then links that along with
+~run.o~ during the generation of the final executable:
+
+#+begin_src sh :results verbatim :exports both
+make
+#+end_src
+
+#+RESULTS:
+: clang -o foo.o -c foo.s
+: clang -shared -o libfoo.dylib foo.o
+: clang -c run.c
+: clang -o run run.o -L. -lfoo
+
+The ~dis-run~ and ~dis-lib~ make targets will show that there is no
+code overlap between the 2 binaries.
+
+~otool~ can be used here to understand the dependencies in the main
+executable:
+
+#+begin_src sh :results verbatim :exports both
+otool -L run
+#+end_src
+
+#+RESULTS:
+: run:
+: 	libfoo.dylib (compatibility version 0.0.0, current version 0.0.0)
+: 	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)
+
+If ~run~ is invoked with the following ~dyld~ runtime flag enabled, we
+can see the lookup for ~libfoo.dylib~ taking place:
+
+#+begin_src sh :results verbatim :exports both
+2>&1 DYLD_PRINT_SEARCHING=t ./run
+#+end_src
+
+#+RESULTS:
+#+begin_example
+dyld[85154]: find path "libfoo.dylib"
+dyld[85154]:   possible path(original path): "libfoo.dylib"
+dyld[85154]:   found: dylib-from-disk: "libfoo.dylib"
+dyld[85154]: find path "/usr/lib/libSystem.B.dylib"
+dyld[85154]:   possible path(original path): "/usr/lib/libSystem.B.dylib"
+dyld[85154]:   found: dylib-from-cache: (0x00AA) "/usr/lib/libSystem.B.dylib"
+dyld[85154]: find path "/usr/lib/libSystem.B.dylib"
+dyld[85154]:   possible path(original path): "/usr/lib/libSystem.B.dylib"
+dyld[85154]:   found: dylib-from-cache: (0x00AA) "/usr/lib/libSystem.B.dylib"
+2 + 2 = 4
+#+end_example
+
+** Runtime Lookup
+:PROPERTIES:
+:header-args:sh: :dir 04--runtime-lookup
+:END:
+
+#+begin_src sh :exports none
+  make clean
+#+end_src
+
+#+RESULTS:
+: rm -f run *.o libfoo.dylib
+
+This section describes the files found in [[file:04--runtime-lookup]].
+
+What about if we don't know until runtime what the library will be
+called, think plugins.  The ~dlopen~ call helps to address this, and
+we can see that ~dyld~ performs some very similar actions in the case
+of this flow:
+
+#+BEGIN_SRC sh :wrap src c :exports results :results verbatim
+cat run.c
+#+END_SRC
+
+#+RESULTS:
+#+begin_src c
+#include <stdio.h>
+#include <stdint.h>
+#include <dlfcn.h>
+#include <assert.h>
+
+typedef uint64_t (*foo_t)(uint64_t, uint64_t);
+
+int main() {
+    /* open the dynaimc library */
+    void* libfoo = dlopen("./libfoo.dylib", RTLD_NOW);
+    assert(libfoo);
+
+    /* find the foo function in the dylib */
+    foo_t foo = (foo_t)dlsym(libfoo, "foo");
+    assert(foo);
+
+    /* invoke foo */
+    printf("%llu + %llu = %llu\n", 2ull, 2ull, foo(2ull, 2ull));
+
+    /* release shared lib resources */
+    dlclose(libfoo);
+}
+#+end_src
+
+
+#+begin_src sh :results verbatim :exports both
+make libfoo.dylib run
+#+end_src
+
+#+RESULTS:
+: clang -o foo.o -c foo.s
+: clang -shared -o libfoo.dylib foo.o
+: clang -c run.c
+: clang -o run run.o
+
+#+begin_src sh :results verbatim :exports both
+2>&1 DYLD_PRINT_SEARCHING=t ./run
+#+end_src
+
+#+RESULTS:
+: dyld[85206]: find path "/usr/lib/libSystem.B.dylib"
+: dyld[85206]:   possible path(original path): "/usr/lib/libSystem.B.dylib"
+: dyld[85206]:   found: dylib-from-cache: (0x00AA) "/usr/lib/libSystem.B.dylib"
+: dyld[85206]: find path "./libfoo.dylib"
+: dyld[85206]:   possible path(original path): "./libfoo.dylib"
+: dyld[85206]:   found: dylib-from-disk: "./libfoo.dylib"
+: 2 + 2 = 4
+
+Note that in this case, the system library is loaded before the
+dynamic library.
+
+~otool~ can be used here to see that there is no compile time
+dependency on the dynamic library from the executable:
+
+#+begin_src sh :results verbatim :exports both
+otool -L run
+#+end_src
+
+#+RESULTS:
+: run:
+: 	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)
+
+** Versioning
+:PROPERTIES:
+:header-args:sh: :dir 05--versioning
+:END:
+
+#+begin_src sh :exports none
+  make clean
+#+end_src
+
+#+RESULTS:
+: rm -f run *.o *.dylib
+
+This section describes the files found in [[file:05--versioning]].
+
+** Library Paths
+:PROPERTIES:
+:header-args:sh: :dir 06--library-path
+:END:
+
+This section describes the files found in [[file:06--library-path]].

@@ -11,7 +11,7 @@
 	.p2align	2
 _foo:
 	.cfi_startproc
-	sub	sp, sp, #16     ; grab some space on stack for spilling registers
+	sub	sp, sp, #16     ; grab some space on stack
 	str	x0, [sp, #8]    ; save x0 (first arg) in to the stack (offset by 8)
 	str	x1, [sp]        ; save x1 (second arg) into the stack
 	ldr	x8, [sp, #8]    ; load x8 with the first arg

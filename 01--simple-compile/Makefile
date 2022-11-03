@@ -16,4 +16,4 @@ otfoo:
 clean:
 	rm -f run *.o
 
-@PHONY: clean dis
+@PHONY: clean dis odfoo otfoo
